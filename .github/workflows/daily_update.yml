@@ -1,0 +1,86 @@
+name: PARI Daily Update
+
+on:
+  schedule:
+    # Cada día a las 07:00 CET (06:00 UTC) — antes de que empieces a trabajar
+    - cron: '0 6 * * *'
+  
+  # Permite lanzarlo manualmente desde GitHub
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Motivo de la ejecución manual'
+        required: false
+        default: 'Actualización manual'
+
+jobs:
+  update-pari:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write  # necesario para hacer push del HTML
+    
+    steps:
+      # ── 1. Descarga el repositorio
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # histórico completo para los commits
+      
+      # ── 2. Configura Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      # ── 3. Instala dependencias
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # ── 4. Ejecuta la recolección de datos
+      - name: Collect PARI data
+        run: |
+          echo "🚀 Iniciando recolección de datos PARI..."
+          python collect_data.py
+        env:
+          # Si en el futuro añades APIs de pago, ponlas aquí como secrets
+          # SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          PYTHONUNBUFFERED: "1"
+      
+      # ── 5. Genera el dashboard HTML
+      - name: Generate HTML dashboard
+        run: |
+          echo "📄 Generando dashboard..."
+          python generate_html.py
+      
+      # ── 6. Commit y push del resultado
+      - name: Commit and push updated dashboard
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "PARI Bot"
+          
+          # Añade todos los archivos actualizados
+          git add data/ docs/
+          
+          # Solo hace commit si hay cambios reales
+          if git diff --staged --quiet; then
+            echo "ℹ️ No hay cambios que commitear."
+          else
+            DATE=$(date '+%Y-%m-%d %H:%M UTC')
+            git commit -m "🔄 PARI Update: ${DATE}"
+            git push
+            echo "✅ Dashboard actualizado y publicado."
+          fi
+      
+      # ── 7. Notificación de éxito (opcional, requiere configurar secret)
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ PARI Spain actualizado correctamente — $(date '+%Y-%m-%d')"
+          else
+            echo "❌ Error en la actualización de PARI Spain — $(date '+%Y-%m-%d')"
+          fi

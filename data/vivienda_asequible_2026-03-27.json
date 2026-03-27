@@ -26,7 +26,7 @@
       "raw": {
         "recent_articles": 0,
         "baseline_weekly": 1,
-        "avg_tone": 0,
+        "avg_tone": 0.0,
         "tier1_articles": 0
       }
     },
@@ -104,5 +104,5 @@
     "pubai": 9.3,
     "nsi": 5.7
   },
-  "generated_at": "2026-03-27T13:27:18.323372Z"
+  "generated_at": "2026-03-27T13:47:42.647647Z"
 }

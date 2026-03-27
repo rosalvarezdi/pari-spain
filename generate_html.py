@@ -1,625 +1,397 @@
 """
-PARI Spain — Daily Engine v2
-==============================
-1. Lee issues.json — única fuente de configuración
-2. Recoge datos reales (GDELT, Trends, RSS, EUR-Lex)
-3. Calcula scores PARI por pilar
-4. Llama a Claude API para generar análisis cualitativo
-5. Guarda todo en data/ para que generate_html.py lo publique
+PARI Spain — HTML Generator v4
+================================
+Lee analysis JSON por issue e inyecta el análisis cualitativo
+dinámicamente en el dashboard, junto con los scores calculados.
 """
 
 import json
-import time
-import datetime
-import requests
-import feedparser
-import os
 import re
+import datetime
 from pathlib import Path
 
-try:
-    from pytrends.request import TrendReq
-    HAS_PYTRENDS = True
-except ImportError:
-    HAS_PYTRENDS = False
+DATA_DIR = Path(__file__).parent / "data"
+DOCS_DIR = Path(__file__).parent / "docs"
+DOCS_DIR.mkdir(exist_ok=True)
+OUT_FILE = DOCS_DIR / "index.html"
+TEMPLATE = Path(__file__).parent / "data" / "PARI_Standalone.html"
+TODAY    = datetime.date.today().isoformat()
 
-# ── CONFIG ────────────────────────────────────────────────────────────
-TODAY      = datetime.date.today()
-DATE_STR   = TODAY.isoformat()
-DATA_DIR   = Path(__file__).parent / "data"
-ISSUES_FILE = Path(__file__).parent / "issues.json"
-DATA_DIR.mkdir(exist_ok=True)
+WEIGHTS = {"mai": .20, "pai": .30, "spi": .20, "pubai": .15, "nsi": .15}
 
-WEIGHTS = {"mai": 0.20, "pai": 0.30, "spi": 0.20, "pubai": 0.15, "nsi": 0.15}
+# ── Helpers HTML ──────────────────────────────────────────────────────
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+def flag_html(flag):
+    level = flag.get("level", "low")
+    cls_map   = {"high": "h", "medium": "m", "low": "l"}
+    color_map = {"high": "#991B1B", "medium": "#92400E", "low": "#1E40AF"}
+    dot_map   = {"high": "#DC2626", "medium": "#D97706", "low": "#2563EB"}
+    bg_map    = {"high": "#FEF2F2", "medium": "#FFFBEB", "low": "#EFF6FF"}
+    bd_map    = {"high": "#FECACA", "medium": "#FDE68A", "low": "#BFDBFE"}
+    cls   = cls_map.get(level, "l")
+    color = color_map.get(level, "#1E40AF")
+    dot   = dot_map.get(level, "#2563EB")
+    bg    = bg_map.get(level, "#EFF6FF")
+    bd    = bd_map.get(level, "#BFDBFE")
+    return f'''<div style="display:flex;gap:11px;padding:11px 13px;border-radius:8px;
+        background:{bg};border:1px solid {bd};margin-bottom:9px">
+      <div style="width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:4px;background:{dot}"></div>
+      <div>
+        <div style="font-size:11px;font-weight:600;margin-bottom:3px;color:{color}">{flag["title"]}</div>
+        <div style="font-size:9px;color:#4B5563;line-height:1.65">{flag["text"]}</div>
+      </div>
+    </div>'''
 
-# ── HELPERS ───────────────────────────────────────────────────────────
+def timeline_html(items):
+    parts = []
+    dot_colors = {"done": "#16A34A", "active": "#CA8A04", "pending": "#D1D5DB"}
+    badge_styles = {
+        "done":    "background:#DCFCE7;color:#166534",
+        "active":  "background:#FEF9C3;color:#854D0E",
+        "pending": "background:#F3F4F6;color:#6B7280",
+    }
+    for item in items:
+        st  = item.get("status", "pending")
+        dot = dot_colors.get(st, "#D1D5DB")
+        bst = badge_styles.get(st, badge_styles["pending"])
+        badge = f'<span style="display:inline-block;font-size:7px;letter-spacing:1px;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle;font-weight:700;{bst}">{item.get("badge","")}</span>'
+        parts.append(f'''<div style="display:flex;gap:9px;align-items:flex-start;padding:6px 0;border-bottom:1px solid rgba(0,0,0,.07)">
+      <div style="width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:3px;background:{dot}"></div>
+      <div style="font-size:8px;color:#6B7280;min-width:68px;flex-shrink:0;padding-top:1px;letter-spacing:1px">{item.get("date","")}</div>
+      <div style="font-size:9px;color:#1A1A2E;line-height:1.5">{item.get("text","")} {badge}</div>
+    </div>''')
+    return "\n".join(parts)
 
-def clamp(v, lo=0, hi=100):
-    return max(lo, min(hi, round(v)))
+def position_html(pos):
+    adopted = pos.get("adopted", [])
+    pending = pos.get("pending", [])
+    approach = pos.get("strategic_approach", "")
+    level = pos.get("strategic_level", "preventive")
 
-def minmax(v, vmin, vmax, scale=100):
-    if vmax == vmin: return 50
-    return clamp((v - vmin) / (vmax - vmin) * scale)
+    level_styles = {
+        "preventive": ("PREVENTIVO", "#DBEAFE", "#166534", "#1E40AF"),
+        "proactive":  ("PROACTIVO",  "#DCFCE7", "#166534", "#16A34A"),
+        "reactive":   ("REACTIVO",   "#FEE2E2", "#991B1B", "#DC2626"),
+        "monitoring": ("MONITOREO",  "#F3F4F6", "#374151", "#6B7280"),
+    }
+    lbl, lbg, ltc, lbc = level_styles.get(level, level_styles["preventive"])
 
-def safe_get(url, timeout=15, retries=2):
-    headers = {"User-Agent": "PARI-Spain/2.0 (public affairs research)"}
-    for i in range(retries):
+    adopted_rows = "".join(
+        f'<div style="font-size:9px;color:#6B7280;line-height:1.6;padding:3px 0;border-bottom:1px solid rgba(0,0,0,.04)">'
+        f'<span style="color:#16A34A;font-weight:700;margin-right:5px">✓</span>{a}</div>'
+        for a in adopted
+    )
+    pending_rows = "".join(
+        f'<div style="font-size:9px;color:#6B7280;line-height:1.6;padding:3px 0;border-bottom:1px solid rgba(0,0,0,.04)">'
+        f'<span style="color:#CA8A04;font-weight:700;margin-right:5px">◎</span>{p}</div>'
+        for p in pending
+    )
+
+    return f'''<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:16px">
+    <div style="padding:12px;background:#fff;border:1px solid rgba(0,0,0,.09);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+      <div style="font-size:7px;letter-spacing:2px;color:#6B7280;margin-bottom:5px">POSICIÓN ADOPTADA</div>
+      <span style="display:inline-block;font-size:7px;letter-spacing:1px;padding:2px 7px;border-radius:3px;margin-bottom:6px;font-weight:700;background:#DCFCE7;color:#166534">COMPLETADO</span>
+      {adopted_rows}
+    </div>
+    <div style="padding:12px;background:#fff;border:1px solid rgba(0,0,0,.09);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+      <div style="font-size:7px;letter-spacing:2px;color:#6B7280;margin-bottom:5px">PENDIENTE</div>
+      <span style="display:inline-block;font-size:7px;letter-spacing:1px;padding:2px 7px;border-radius:3px;margin-bottom:6px;font-weight:700;background:#FEF9C3;color:#854D0E">PENDIENTE</span>
+      {pending_rows}
+    </div>
+  </div>
+  <div style="padding:12px;background:#fff;border:1px solid rgba(0,0,0,.09);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+    <div style="font-size:7px;letter-spacing:2px;color:#6B7280;margin-bottom:5px">ENFOQUE ESTRATÉGICO</div>
+    <span style="display:inline-block;font-size:7px;letter-spacing:1px;padding:2px 7px;border-radius:3px;margin-bottom:6px;font-weight:700;background:{lbg};color:{lbc}">{lbl}</span>
+    <div style="font-size:9px;color:#6B7280;line-height:1.7">{approach}</div>
+  </div>'''
+
+def registradores_html(reg):
+    formal  = reg.get("formal_position", False)
+    note    = reg.get("formal_position_note", "")
+    vectors = reg.get("vectors", [])
+    action  = reg.get("recommended_action", "")
+
+    status_badge = (
+        f'<span style="background:#DCFCE7;color:#166534;font-size:7px;font-weight:700;'
+        f'padding:2px 8px;border-radius:3px;letter-spacing:1px">POSICIÓN FORMAL ADOPTADA</span>'
+        if formal else
+        f'<span style="background:#FEF9C3;color:#854D0E;font-size:7px;font-weight:700;'
+        f'padding:2px 8px;border-radius:3px;letter-spacing:1px">POSICIÓN FORMAL PENDIENTE</span>'
+    )
+
+    vector_rows = "".join(
+        f'<div style="margin-bottom:10px">'
+        f'<div style="font-size:9px;font-weight:600;color:#1A1A2E;margin-bottom:3px">{v["title"]}</div>'
+        f'<div style="font-size:9px;color:#6B7280;line-height:1.7">{v["text"]}</div>'
+        f'</div>'
+        for v in vectors
+    )
+
+    return f'''<div style="padding:14px;background:#fff;border:1px solid rgba(0,0,0,.09);border-radius:8px;font-size:9px;color:#6B7280;line-height:1.75;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+    <div style="margin-bottom:10px">{status_badge}</div>
+    <div style="font-size:9px;color:#4B5563;margin-bottom:12px">{note}</div>
+    {vector_rows}
+    <div style="margin-top:10px;padding:10px;background:rgba(154,111,58,.06);border-radius:6px;border-left:3px solid rgba(154,111,58,.4)">
+      <div style="font-size:8px;font-weight:600;color:#9A6F3A;margin-bottom:3px;letter-spacing:1px">→ ACCIÓN RECOMENDADA</div>
+      <div style="font-size:9px;color:#6B7280;line-height:1.6">{action}</div>
+    </div>
+  </div>'''
+
+
+def build_analysis_tab(analysis, pari, risk_label, risk_color, velocity):
+    """Genera el HTML completo de la pestaña ANÁLISIS desde el JSON."""
+    meta     = analysis.get("_meta", {})
+    flags    = analysis.get("risk_flags", [])
+    position = analysis.get("position", {})
+    timeline = analysis.get("timeline", [])
+    reg      = analysis.get("registradores", {})
+
+    vel_color = "#DC2626" if velocity > 0 else "#16A34A" if velocity < 0 else "#9CA3AF"
+    vel_text  = f"▲ +{velocity}" if velocity > 0 else f"▼ {velocity}" if velocity < 0 else "→ 0"
+    trend_lbl = "TENDENCIA ALCISTA" if velocity > 0 else "TENDENCIA BAJISTA" if velocity < 0 else "ESTABLE"
+
+    section = lambda t: f'<div style="font-size:8px;letter-spacing:3px;color:#6B7280;margin:18px 0 10px">{t}</div>'
+
+    return f'''<div style="margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid rgba(0,0,0,.09)">
+    <div style="font-size:8px;letter-spacing:2px;color:#6B7280;margin-bottom:5px">
+      ANÁLISIS PARI · CASO ESPAÑA / UE · {meta.get("last_updated", TODAY)}
+      <span style="margin-left:8px;font-size:7px;color:#9CA3AF">Actualizado por: {meta.get("updated_by","—")}</span>
+    </div>
+    <div style="font-family:Lora,Georgia,serif;font-size:19px;font-weight:700;margin-bottom:3px;color:#1A1A2E">{meta.get("issue_name","")}</div>
+    <div style="font-size:10px;color:#6B7280">{meta.get("subtitle","")}</div>
+    <div style="display:flex;align-items:baseline;gap:10px;margin:10px 0 3px">
+      <div id="analysisPariNum" style="font-family:Lora,Georgia,serif;font-size:44px;font-weight:700;color:{risk_color}">{pari}</div>
+      <div>
+        <div style="font-size:9px;color:#6B7280;letter-spacing:2px">PARI COMPUESTO</div>
+        <div id="analysisVel" style="font-size:10px;color:{vel_color}">{vel_text} · RIESGO {risk_label.upper()} · {trend_lbl}</div>
+      </div>
+    </div>
+  </div>
+
+  {section("SEÑALES DE RIESGO — PERSPECTIVA REGISTRAL")}
+  {"".join(flag_html(f) for f in flags)}
+
+  {section("POSICIÓN Y PENDIENTES")}
+  {position_html(position)}
+
+  {section("CALENDARIO LEGISLATIVO")}
+  <div style="background:#fff;border:1px solid rgba(0,0,0,.09);border-radius:8px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+    {timeline_html(timeline)}
+  </div>
+
+  {section("POSICIÓN DE LOS REGISTRADORES")}
+  {registradores_html(reg)}'''
+
+
+# ── Data loading ──────────────────────────────────────────────────────
+
+def load_scores():
+    summary_file = DATA_DIR / "summary.json"
+    if not summary_file.exists():
+        return get_fallback_scores()
+    try:
+        summary = json.loads(summary_file.read_text())
+        issues  = summary.get("issues", [])
+        if not issues:
+            return get_fallback_scores()
+        cases = []
+        for iss in issues:
+            h_file = DATA_DIR / f"{iss['id']}_history.json"
+            d_file = DATA_DIR / f"{iss['id']}_latest.json"
+            history, sub_scores = [], {}
+            if h_file.exists():
+                try: history = json.loads(h_file.read_text())
+                except: pass
+            if d_file.exists():
+                try:
+                    detail = json.loads(d_file.read_text())
+                    for pid, pdata in detail.get("pillar_detail", {}).items():
+                        if pdata.get("sub"):
+                            sub_scores[pid] = pdata["sub"]
+                except: pass
+            cases.append({
+                "name": iss["name"], "scores": iss["scores"],
+                "velocity": iss.get("velocity", 0), "date": iss.get("date", TODAY),
+                "history": history, "sub_scores": sub_scores,
+                "issue_id": iss["id"],
+            })
+        return cases, TODAY
+    except Exception as e:
+        print(f"  ⚠ {e}")
+        return get_fallback_scores()
+
+def get_fallback_scores():
+    return [{
+        "issue_id": "vivienda_asequible",
+        "name": "Plan Europeo Vivienda Asequible",
+        "scores": {"mai":62,"pai":79,"spi":65,"pubai":58,"nsi":71},
+        "velocity": 8, "date": TODAY, "history": [],
+        "sub_scores": {
+            "mai":{"mai_vol":65,"mai_sent":60,"mai_acc":68,"mai_tier":55,"mai_edit":62},
+            "pai":{"pai_parl":82,"pai_leg":75,"pai_reg":80,"pai_exec":76,"pai_cont":82},
+            "spi":{"spi_ngo":70,"spi_camp":60,"spi_corp":65,"spi_think":68,"spi_lit":62},
+            "pubai":{"pub_search":62,"pub_social":55,"pub_viral":50,"pub_polar":58,"pub_geo":65},
+            "nsi":{"nsi_kw":75,"nsi_frame":72,"nsi_meta":68,"nsi_coal":70,"nsi_count":69},
+        },
+    }], TODAY
+
+def load_analysis(issue_id):
+    """Carga el JSON de análisis cualitativo para un issue."""
+    a_file = DATA_DIR / f"{issue_id}_analysis.json"
+    if a_file.exists():
         try:
-            r = requests.get(url, headers=headers, timeout=timeout)
-            r.raise_for_status()
-            return r
+            return json.loads(a_file.read_text())
         except Exception as e:
-            if i == retries - 1:
-                print(f"    ⚠ {url[:55]}: {e}")
-            time.sleep(2)
+            print(f"  ⚠ Error leyendo análisis de {issue_id}: {e}")
     return None
 
-def log(msg): print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}")
-
 def get_risk(score):
-    if score <= 20:  return "Mínimo",  "#16A34A"
-    if score <= 40:  return "Bajo",    "#65A30D"
-    if score <= 60:  return "Moderado","#CA8A04"
-    if score <= 75:  return "Elevado", "#EA580C"
-    if score <= 90:  return "Alto",    "#DC2626"
-    return                  "Crítico", "#9333EA"
+    if score <= 20:  return ("Mínimo",   "#16A34A")
+    if score <= 40:  return ("Bajo",     "#65A30D")
+    if score <= 60:  return ("Moderado", "#CA8A04")
+    if score <= 75:  return ("Elevado",  "#EA580C")
+    if score <= 90:  return ("Alto",     "#DC2626")
+    return                   ("Crítico",  "#9333EA")
 
-def today_gdelt(): return TODAY.strftime("%Y%m%d%H%M%S")
-def week_gdelt():  return (TODAY - datetime.timedelta(days=7)).strftime("%Y%m%d%H%M%S")
-def month_gdelt(): return (TODAY - datetime.timedelta(days=30)).strftime("%Y%m%d%H%M%S")
+# ── Injection ─────────────────────────────────────────────────────────
 
-# ── PILLAR 1: MEDIA ATTENTION (MAI) ──────────────────────────────────
-
-def collect_mai(issue):
-    log("  MAI — GDELT...")
-    q = requests.utils.quote(issue["search_terms"]["gdelt"])
-    base = "https://api.gdeltproject.org/api/v2/doc/doc"
-
-    recent, baseline = [], []
-    r1 = safe_get(f"{base}?query={q}%20sourcelang:Spanish&mode=artlist&maxrecords=250"
-                  f"&startdatetime={week_gdelt()}&enddatetime={today_gdelt()}&format=json")
-    if r1:
-        try: recent = r1.json().get("articles", [])
-        except: pass
-
-    r2 = safe_get(f"{base}?query={q}%20sourcelang:Spanish&mode=artlist&maxrecords=250"
-                  f"&startdatetime={month_gdelt()}&enddatetime={week_gdelt()}&format=json")
-    if r2:
-        try: baseline = r2.json().get("articles", [])
-        except: pass
-
-    rc = len(recent)
-    bc_weekly = len(baseline) / 3 if baseline else 1
-    tones = [a.get("tone", 0) for a in recent if "tone" in a]
-    avg_tone = sum(tones) / len(tones) if tones else 0
-
-    tier1 = ["elpais.com","elmundo.es","abc.es","expansion.com","elconfidencial.com",
-             "eldiario.es","europapress.es","politico.eu","cincodias.elpais.com"]
-    t1_count = sum(1 for a in recent if any(d in a.get("url","").lower() for d in tier1))
-
-    vol_score   = minmax(rc, 0, 200)
-    sent_score  = clamp(50 - avg_tone * 5)
-    accel       = (rc - bc_weekly) / bc_weekly if bc_weekly > 0 else 0
-    accel_score = clamp(50 + accel * 30)
-    tier_score  = minmax(t1_count / max(rc, 1), 0, 0.5)
-    edit_score  = minmax(sum(1 for a in recent if abs(a.get("tone",0)) > 3), 0, 30)
-
-    score = clamp(.25*vol_score + .25*sent_score + .20*accel_score + .15*tier_score + .15*edit_score)
-    sub   = {"coverage_volume": vol_score, "sentiment_trajectory": sent_score,
-             "acceleration": accel_score, "media_tier": tier_score, "editorial": edit_score}
-    raw   = {"recent": rc, "baseline_weekly": round(bc_weekly,1), "avg_tone": round(avg_tone,2)}
-    log(f"    MAI={score} (vol={vol_score}, sent={sent_score}, accel={accel_score})")
-    return {"score": score, "sub": sub, "raw": raw}
-
-# ── PILLAR 2: POLITICAL ACTIVITY (PAI) ───────────────────────────────
-
-def collect_pai(issue):
-    log("  PAI — EUR-Lex + Congreso RSS + Euractiv...")
-    sub = {}
-
-    # EUR-Lex RSS
-    q_el = requests.utils.quote(issue["search_terms"]["eurlex"])
-    feed_el = feedparser.parse(
-        f"https://eur-lex.europa.eu/search.html?text={q_el}&scope=EURLEX&lang=es&rss=true"
-    )
-    eurlex_count = len(feed_el.entries) if feed_el.entries else 0
-    sub["legislative_pipeline"] = clamp(10 + eurlex_count * 13)
-
-    # Congreso RSS
-    q_co = requests.utils.quote(issue["search_terms"]["congress"])
-    feed_co = feedparser.parse(
-        f"https://www.congreso.es/rss/iniciativasBusqueda?texto={q_co}&legislatura=15&tipo=todos"
-    )
-    parl_count = len(feed_co.entries) if feed_co.entries else 0
-    sub["parliamentary_mentions"] = clamp(minmax(parl_count, 0, 20) * .7 + 30)
-
-    # Euractiv
-    reg_hits = 0
-    for feed_url in ["https://www.euractiv.com/sections/eu-priorities-2020/feed/",
-                     "https://www.europarl.europa.eu/rss/doc/top-stories/es.xml"]:
-        feed = feedparser.parse(feed_url)
-        kws = issue["search_terms"]["eurlex"].split()[:3]
-        for e in feed.entries[:30]:
-            if any(k.lower() in (e.get("title","") + e.get("summary","")).lower() for k in kws):
-                reg_hits += 1
-    sub["regulatory_signals"] = clamp(minmax(reg_hits, 0, 10) * .6 + 30)
-
-    # PE press releases
-    ep = feedparser.parse("https://www.europarl.europa.eu/rss/doc/press-releases/es.xml")
-    exec_hits = sum(1 for e in ep.entries[:50]
-                    if any(k.lower() in (e.get("title","") + e.get("summary","")).lower()
-                           for k in issue["search_terms"]["eurlex"].split()))
-    sub["executive_statements"] = clamp(minmax(exec_hits, 0, 5) * .7 + 35)
-
-    # Cross-border GDELT
-    q_int = requests.utils.quote(issue["search_terms"]["eurlex"] + " Europe regulation")
-    r_int = safe_get(
-        f"https://api.gdeltproject.org/api/v2/doc/doc?query={q_int}"
-        f"&mode=artlist&maxrecords=100&startdatetime={week_gdelt()}&enddatetime={today_gdelt()}&format=json"
-    )
-    intl = 0
-    if r_int:
-        try: intl = len(r_int.json().get("articles", []))
-        except: pass
-    sub["cross_border_contagion"] = clamp(minmax(intl, 0, 100) * .5 + 40)
-
-    score = clamp(.25*sub["parliamentary_mentions"] + .25*sub["legislative_pipeline"] +
-                  .20*sub["regulatory_signals"] + .15*sub["executive_statements"] +
-                  .15*sub["cross_border_contagion"])
-    log(f"    PAI={score}")
-    return {"score": score, "sub": sub, "raw": {"eurlex": eurlex_count, "parl": parl_count}}
-
-# ── PILLAR 3: STAKEHOLDER PRESSURE (SPI) ─────────────────────────────
-
-def collect_spi(issue):
-    log("  SPI — NGOs + News...")
-    sub = {}
-
-    ngo_hits = 0
-    all_feeds = issue["search_terms"].get("ngo_feeds", []) + [
-        "https://www.caritas.es/feed/", "https://www.ccoo.es/rss/Actuaciones_y_noticias.rss",
-        "https://afectadosporlahipoteca.com/feed/",
-    ]
-    kws = issue["risk_keywords"][:5]
-    for url in all_feeds:
-        try:
-            feed = feedparser.parse(url)
-            for e in feed.entries[:20]:
-                if any(k in (e.get("title","") + e.get("summary","")).lower() for k in kws):
-                    ngo_hits += 1
-        except: pass
-    sub["ngo_civil_society"] = clamp(minmax(ngo_hits, 0, 15) * .6 + 25)
-
-    q = requests.utils.quote(f"campaña petición {issue['search_terms']['congress']} España {TODAY.year}")
-    feed_n = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=es&gl=ES&ceid=ES:es")
-    camp = sum(1 for e in feed_n.entries[:30]
-               if any(k in e.get("title","").lower() for k in ["petición","campaña","manifestación","protesta","plataforma"]))
-    sub["advocacy_campaigns"] = clamp(minmax(camp, 0, 10) * .7 + 20)
-
-    corp_kws = ["se compromete","anuncia medidas","nuevo plan","regulación propia"]
-    q2 = requests.utils.quote(f"empresa regulación {issue['search_terms']['congress']} España")
-    f2  = feedparser.parse(f"https://news.google.com/rss/search?q={q2}&hl=es&gl=ES&ceid=ES:es")
-    corp = sum(1 for e in f2.entries[:20]
-               if any(k in (e.get("title","") + e.get("summary","")).lower() for k in corp_kws))
-    sub["corporate_repositioning"] = clamp(minmax(corp, 0, 8) * .6 + 30)
-
-    tt_hits = 0
-    for url in ["https://www.funcas.es/feed/","https://www.elcano.es/rss/","https://www.fedea.net/feed/"]:
-        try:
-            f = feedparser.parse(url)
-            for e in f.entries[:15]:
-                if any(k in (e.get("title","") + e.get("summary","")).lower()
-                       for k in issue["search_terms"]["congress"].split()):
-                    tt_hits += 1
-        except: pass
-    sub["think_tank_output"] = clamp(minmax(tt_hits, 0, 10) * .7 + 25)
-
-    q3 = requests.utils.quote(f"demanda denuncia recurso {issue['search_terms']['congress']} España tribunal")
-    f3  = feedparser.parse(f"https://news.google.com/rss/search?q={q3}&hl=es&gl=ES&ceid=ES:es")
-    legal = sum(1 for e in f3.entries[:20]
-                if any(k in e.get("title","").lower() for k in ["demanda","denuncia","sentencia","tribunal"]))
-    sub["legal_litigation"] = clamp(minmax(legal, 0, 8) * .7 + 20)
-
-    score = clamp(.25*sub["ngo_civil_society"] + .20*sub["advocacy_campaigns"] +
-                  .20*sub["corporate_repositioning"] + .20*sub["think_tank_output"] +
-                  .15*sub["legal_litigation"])
-    log(f"    SPI={score}")
-    return {"score": score, "sub": sub, "raw": {"ngo_hits": ngo_hits, "camp": camp}}
-
-# ── PILLAR 4: PUBLIC ATTENTION (PubAI) ───────────────────────────────
-
-def collect_pubai(issue):
-    log("  PubAI — Google Trends + News...")
-    sub = {}
-
-    search_score = 40
-    if HAS_PYTRENDS:
-        try:
-            pt = TrendReq(hl="es-ES", tz=60, timeout=(10,25), retries=2, backoff_factor=0.5)
-            terms = issue["search_terms"]["trends"][:5]
-            pt.build_payload(terms, cat=0, timeframe="today 3-m", geo="ES")
-            df = pt.interest_over_time()
-            if not df.empty:
-                last2w = df.iloc[-2:][terms].mean().mean()
-                avg    = df[terms].mean().mean()
-                ratio  = last2w / max(avg, 1)
-                search_score = clamp(minmax(last2w, 0, 100) * .6 + minmax(ratio, 0.5, 2.0) * .4)
-        except Exception as e:
-            log(f"    ⚠ Trends: {e}")
-    sub["search_intensity"] = clamp(search_score)
-
-    q = requests.utils.quote(" ".join(issue["search_terms"]["trends"][:2]))
-    f = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=es&gl=ES&ceid=ES:es")
-    social = len(f.entries)
-    sources = len(set(e.get("source",{}).get("title","") for e in f.entries[:20]))
-    sub["social_volume"]  = clamp(minmax(social, 0, 30) * .7 + 25)
-    sub["virality"]       = clamp(minmax(sources, 1, 15) * .6 + 20)
-    sub["public_polarity"] = 40  # default without GDELT tone variance
-    sub["geographic_concentration"] = 45
-
-    score = clamp(.30*sub["search_intensity"] + .25*sub["social_volume"] +
-                  .20*sub["virality"] + .15*sub["public_polarity"] +
-                  .10*sub["geographic_concentration"])
-    log(f"    PubAI={score}")
-    return {"score": score, "sub": sub, "raw": {"social": social, "sources": sources}}
-
-# ── PILLAR 5: NARRATIVE SHIFT (NSI) ──────────────────────────────────
-
-def collect_nsi(issue):
-    log("  NSI — GDELT keyword analysis...")
-    sub = {}
-
-    q = requests.utils.quote(issue["search_terms"]["gdelt"])
-    r = safe_get(
-        f"https://api.gdeltproject.org/api/v2/doc/doc?query={q}%20sourcelang:Spanish"
-        f"&mode=artlist&maxrecords=250&startdatetime={week_gdelt()}&enddatetime={today_gdelt()}&format=json"
-    )
-    articles = []
-    if r:
-        try: articles = r.json().get("articles", [])
-        except: pass
-
-    all_text = " ".join(
-        a.get("title","") + " " + a.get("url","") for a in articles
-    ).lower()
-
-    risk_kws    = issue.get("risk_keywords", [])
-    neutral_kws = issue.get("neutral_keywords", [])
-    rc = sum(all_text.count(k) for k in risk_kws)
-    nc = sum(all_text.count(k) for k in neutral_kws)
-    ratio = rc / (rc + nc) if (rc + nc) > 0 else 0.4
-    sub["keyword_emergence"] = clamp(minmax(ratio, 0, 0.8) * .7 + 20)
-
-    moral   = ["derecho fundamental","derecho humano","emergencia","crisis","dignidad","exclusión","víctima"]
-    tech    = ["reglamento","directiva","transposición","propuesta","consulta","borrador"]
-    mc = sum(all_text.count(k) for k in moral)
-    tc = sum(all_text.count(k) for k in tech)
-    mr = mc / (mc + tc) if (mc + tc) > 0 else 0.4
-    sub["framing_migration"] = clamp(minmax(mr, 0, 0.8) * .7 + 20)
-
-    analogy = ["escándalo","burbuja","colapso","especulación","expulsión","gentrificación","turistificación"]
-    ac = sum(all_text.count(k) for k in analogy)
-    sub["metaphor_tracking"] = clamp(minmax(ac, 0, 20) * .7 + 20)
-
-    risk_domains = set()
-    for a in articles:
-        if any(k in a.get("title","").lower() for k in risk_kws[:5]):
-            try: risk_domains.add(a.get("url","").split("/")[2])
-            except: pass
-    sub["narrative_coalition"] = clamp(minmax(len(risk_domains), 0, 20) * .7 + 20)
-
-    pos_kws = ["seguridad jurídica","inversión","oferta","simplificación","datos positivos","acuerdo"]
-    pc = sum(all_text.count(k) for k in pos_kws)
-    sub["counter_narrative"] = clamp(100 - minmax(pc, 0, 30) * .5)
-
-    score = clamp(.25*sub["keyword_emergence"] + .25*sub["framing_migration"] +
-                  .20*sub["metaphor_tracking"] + .20*sub["narrative_coalition"] +
-                  .10*sub["counter_narrative"])
-    log(f"    NSI={score}")
-    return {"score": score, "sub": sub, "raw": {"risk_kw": rc, "moral": mc, "domains": len(risk_domains)}}
-
-# ── GEMINI AI ANALYSIS ───────────────────────────────────────────────
-
-def generate_ai_analysis(issue, pillar_scores, pari, risk_label, velocity, history):
-    """
-    Llama a Google Gemini API (gratuita) para generar el análisis cualitativo.
-    Modelo: gemini-2.0-flash  — gratuito, 1500 req/día, muy rápido.
-    Obtén tu key gratis en: https://aistudio.google.com/app/apikey
-    """
-    if not GEMINI_API_KEY:
-        log("  ⚠ GEMINI_API_KEY no configurada — análisis IA omitido")
-        return None
-
-    # Historial reciente para dar contexto de tendencia
-    hist_text = ""
-    if len(history) > 1:
-        last_7 = history[-7:]
-        hist_text = f"\nHistórico reciente (últimos {len(last_7)} días):\n"
-        for h in last_7:
-            hist_text += f"  {h['date']}: PARI={h['pari']} ({h.get('risk','')})\n"
-
-    scores_text = "\n".join(
-        f"  - {k.upper()} ({int(WEIGHTS[k]*100)}% peso): {v}/100"
-        for k, v in pillar_scores.items()
-    )
-
-    velocity_text = (
-        f"▲ +{velocity} puntos (ESCALANDO)" if velocity > 5
-        else f"▲ +{velocity} (subiendo)" if velocity > 0
-        else f"→ {velocity} (estable)" if velocity == 0
-        else f"▼ {velocity} (descendiendo)"
-    )
-
-    prompt = f"""Eres un analista senior de public affairs especializado en regulación europea y riesgo político.
-Analiza este caso y genera un análisis estratégico en JSON.
-
-ISSUE: {issue['name']}
-GEOGRAFÍA: {issue['geography']}
-SECTOR: {issue['sector']}
-CONTEXTO: {issue['context']}
-STAKEHOLDERS CLAVE: {issue['stakeholders']}
-
-PARI SCORE HOY: {pari}/100 — RIESGO {risk_label.upper()}
-VELOCITY: {velocity_text}
-{hist_text}
-SCORES POR PILAR:
-{scores_text}
-
-Interpreta los scores así:
-- MAI alto → cobertura mediática intensa y/o negativa
-- PAI alto → actividad parlamentaria/regulatoria elevada
-- SPI alto → presión activa de stakeholders (ONGs, empresas, academia)
-- PubAI alto → alta atención pública (búsquedas, redes sociales)
-- NSI alto → cambio de narrativa hacia framing de riesgo/crisis
-
-Genera SOLO el siguiente JSON sin texto adicional, sin bloques markdown, sin explicaciones:
-
-{{
-  "risk_flags": [
-    {{
-      "level": "high",
-      "title": "Título conciso del riesgo principal (máx 80 caracteres)",
-      "text": "Descripción del riesgo, su origen y consecuencias prácticas para public affairs (2-3 frases)."
-    }},
-    {{
-      "level": "medium",
-      "title": "Segundo riesgo",
-      "text": "Descripción (2-3 frases)."
-    }},
-    {{
-      "level": "low",
-      "title": "Oportunidad o riesgo menor",
-      "text": "Descripción (2-3 frases)."
-    }}
-  ],
-  "position": {{
-    "adopted": [
-      "Primera acción o posición ya adoptada",
-      "Segunda acción o posición ya adoptada"
-    ],
-    "pending": [
-      "Primera acción pendiente de definir o ejecutar",
-      "Segunda acción pendiente",
-      "Tercera acción pendiente"
-    ],
-    "strategic_approach": "Descripción del enfoque estratégico recomendado basado en el score actual (2-3 frases).",
-    "strategic_level": "preventive"
-  }},
-  "timeline": [
-    {{
-      "status": "done",
-      "date": "MES AÑO",
-      "text": "Hito legislativo o político ya ocurrido",
-      "badge": "COMPLETADO"
-    }},
-    {{
-      "status": "active",
-      "date": "MES AÑO",
-      "text": "Hito en curso ahora mismo",
-      "badge": "EN CURSO"
-    }},
-    {{
-      "status": "pending",
-      "date": "AÑO (tf)",
-      "text": "Hito futuro relevante para el issue",
-      "badge": "PENDIENTE"
-    }}
-  ],
-  "registradores": {{
-    "formal_position": false,
-    "formal_position_note": "Estado actual de la posición formal del actor institucional principal.",
-    "vectors": [
-      {{
-        "title": "Vector 1 — nombre descriptivo",
-        "text": "Análisis del primer vector de riesgo o impacto (2-3 frases)."
-      }},
-      {{
-        "title": "Vector 2 — nombre descriptivo",
-        "text": "Análisis del segundo vector (2-3 frases)."
-      }}
-    ],
-    "recommended_action": "Acción concreta recomendada para el profesional de public affairs (1-2 frases)."
-  }},
-  "strategic_summary": "Síntesis ejecutiva de 3-4 frases para un director de public affairs: qué está pasando, por qué importa ahora, y qué hacer.",
-  "watch_next": [
-    "Primera señal concreta a vigilar en los próximos 30 días",
-    "Segunda señal a vigilar",
-    "Tercera señal a vigilar"
-  ]
-}}"""
-
-    log("  🤖 Generando análisis con Gemini API...")
-    try:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+def build_cases_js(cases):
+    lines = [f"/* ═══ CASOS — generado automáticamente · {TODAY} ═══ */", "const CASES = ["]
+    for c in cases:
+        h_compact = [{k:v for k,v in h.items() if k in ("date","pari","mai","pai","spi","pubai","nsi","velocity")}
+                     for h in c.get("history",[])[-90:]]
+        lines.append(
+            "  {\n"
+            f'    name:{json.dumps(c["name"])},\n'
+            f'    scores:{{{",".join(f"{k}:{v}" for k,v in c["scores"].items())}}},\n'
+            f'    velocity:{c["velocity"]},\n'
+            f'    date:{json.dumps(c["date"])},\n'
+            f'    history:{json.dumps(h_compact,ensure_ascii=False)},\n'
+            f'    sub_scores:{json.dumps(c.get("sub_scores",{}),ensure_ascii=False)},\n'
+            "  },"
         )
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.3,        # más determinista = más consistente
-                "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",  # fuerza JSON puro
-            }
-        }
-        resp = requests.post(url, json=payload, timeout=60)
-        resp.raise_for_status()
+    lines.append("];")
+    return "\n".join(lines)
 
-        raw = resp.json()
-        content = raw["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-        # Limpia bloques markdown por si acaso
-        content = re.sub(r'^```json\s*', '', content)
-        content = re.sub(r'\s*```$', '', content)
-
-        analysis = json.loads(content)
-        analysis["_meta"] = {
-            "issue_id":            issue["id"],
-            "issue_name":          issue["name"],
-            "last_updated":        DATE_STR,
-            "generated_by":        "gemini-2.0-flash",
-            "pari_at_generation":  pari,
-            "subtitle": f"Análisis de public affairs · {issue['geography']} · {DATE_STR}"
-        }
-        n_flags    = len(analysis.get("risk_flags", []))
-        n_timeline = len(analysis.get("timeline", []))
-        log(f"  ✅ Análisis Gemini: {n_flags} flags, {n_timeline} hitos en timeline")
-        return analysis
-
-    except json.JSONDecodeError as e:
-        log(f"  ⚠ JSON inválido de Gemini: {e}")
-        log(f"     Respuesta: {content[:200] if 'content' in dir() else 'N/A'}")
-        return None
-    except Exception as e:
-        log(f"  ⚠ Error Gemini API: {e}")
-        return None
-
-# ── VELOCITY ──────────────────────────────────────────────────────────
-
-def compute_velocity(issue_id, current_pari):
-    h_file = DATA_DIR / f"{issue_id}_history.json"
-    if h_file.exists():
-        try:
-            history = json.loads(h_file.read_text())
-            if history:
-                return current_pari - history[-1]["pari"]
-        except: pass
-    return 0
-
-def save_history(issue_id, pari, risk_label, velocity, pillar_scores):
-    h_file = DATA_DIR / f"{issue_id}_history.json"
-    history = []
-    if h_file.exists():
-        try: history = json.loads(h_file.read_text())
-        except: pass
-    history = [h for h in history if h["date"] != DATE_STR]
-    history.append({
-        "date": DATE_STR, "pari": pari, "risk": risk_label, "velocity": velocity,
-        **{k: pillar_scores[k] for k in WEIGHTS}
-    })
-    history = sorted(history, key=lambda x: x["date"])[-90:]
-    h_file.write_text(json.dumps(history, indent=2, ensure_ascii=False))
-    return history
-
-# ── MAIN ──────────────────────────────────────────────────────────────
-
-def run_issue(issue):
-    log(f"\n{'='*55}")
-    log(f"  {issue['name']} [{issue['geography']}]")
-    log(f"{'='*55}")
-
-    mai   = collect_mai(issue)
-    pai   = collect_pai(issue)
-    spi   = collect_spi(issue)
-    pubai = collect_pubai(issue)
-    nsi   = collect_nsi(issue)
-
-    pillar_scores = {
-        "mai": mai["score"], "pai": pai["score"], "spi": spi["score"],
-        "pubai": pubai["score"], "nsi": nsi["score"]
-    }
-    pari = round(sum(WEIGHTS[k] * v for k, v in pillar_scores.items()))
-    risk_label, risk_color = get_risk(pari)
-    velocity = compute_velocity(issue["id"], pari)
-    history  = save_history(issue["id"], pari, risk_label, velocity, pillar_scores)
-
-    # Genera análisis con IA
-    analysis = generate_ai_analysis(
-        issue, pillar_scores, pari, risk_label, velocity, history
+def build_header_buttons(cases):
+    return "\n".join(
+        f'    <button class="demo-btn{" active-case" if i==0 else ""}" onclick="loadCase({i})">'
+        f'{c["name"].split("(")[0].strip()[:28]}</button>'
+        for i, c in enumerate(cases)
     )
 
-    # Si Claude falla, carga el último análisis guardado
-    if analysis is None:
-        a_file = DATA_DIR / f"{issue['id']}_analysis.json"
-        if a_file.exists():
-            try:
-                analysis = json.loads(a_file.read_text())
-                analysis["_meta"]["last_updated"] = DATE_STR
-                log("  ↩ Usando análisis anterior guardado")
-            except: pass
+def build_analysis_placeholder():
+    """HTML por defecto cuando no hay JSON de análisis."""
+    return '''<div style="text-align:center;padding:40px;color:#6B7280;font-size:11px">
+    <div style="font-size:24px;margin-bottom:12px">📋</div>
+    <div style="font-weight:600;margin-bottom:6px">Análisis cualitativo no disponible</div>
+    <div style="font-size:10px">Crea el archivo <code>data/{issue_id}_analysis.json</code><br>
+    siguiendo la plantilla incluida en el repositorio.</div>
+  </div>'''
 
-    # Guarda análisis
-    if analysis:
-        a_file = DATA_DIR / f"{issue['id']}_analysis.json"
-        a_file.write_text(json.dumps(analysis, indent=2, ensure_ascii=False))
+def inject(template_html, cases, analyses, generated_date):
+    html = template_html
 
-    result = {
-        "issue_id": issue["id"], "issue_name": issue["name"],
-        "geography": issue.get("geography",""), "sector": issue.get("sector",""),
-        "date": DATE_STR, "pari": pari, "risk_level": risk_label,
-        "risk_color": risk_color, "velocity": velocity,
-        "pillar_scores": pillar_scores,
-        "pillar_detail": {
-            "mai": mai, "pai": pai, "spi": spi, "pubai": pubai, "nsi": nsi
-        },
-        "weights": WEIGHTS,
-        "contributions": {k: round(WEIGHTS[k]*v, 1) for k, v in pillar_scores.items()},
-        "generated_at": datetime.datetime.utcnow().isoformat() + "Z"
-    }
+    # 1. CASES JS block
+    new_block = build_cases_js(cases)
+    pattern = r'/\* ═══ CASOS.*?const CASES = \[.*?\];'
+    result = re.sub(pattern, new_block, html, flags=re.DOTALL)
+    if result == html:
+        occ = [m.start() for m in re.finditer(r'const CASES = \[', html)]
+        if len(occ) >= 2:
+            start = occ[1]
+            close = html.find('\n];', start)
+            if close > 0:
+                html = html[:start] + new_block + html[close+3:]
+                result = html
+    html = result
 
-    # Guarda latest y today
-    (DATA_DIR / f"{issue['id']}_latest.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
-    (DATA_DIR / f"{issue['id']}_{DATE_STR}.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    # 2. Header buttons
+    html = re.sub(r'(<div class="header-btns">).*?(</div>)',
+                  f'\\1\n{build_header_buttons(cases)}\n  \\2',
+                  html, flags=re.DOTALL, count=1)
 
-    log(f"\n  ✅ PARI={pari} [{risk_label}]  Velocity={velocity:+d}  Analysis={'✅' if analysis else '❌'}")
-    return result
+    # 3. Issue name input
+    if cases:
+        html = re.sub(r'(id="issueName"\s+value=")[^"]*(")', f'\\g<1>{cases[0]["name"]}\\2', html)
 
-def generate_summary(results):
-    summary = {
-        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
-        "date": DATE_STR,
-        "issues": [{
-            "id": r["issue_id"], "name": r["issue_name"],
-            "geography": r.get("geography",""), "sector": r.get("sector",""),
-            "date": r["date"], "pari": r["pari"],
-            "risk_level": r["risk_level"], "risk_color": r["risk_color"],
-            "velocity": r["velocity"], "scores": r["pillar_scores"]
-        } for r in results]
-    }
-    (DATA_DIR / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    # 4. Update badge
+    html = re.sub(r'(class="case-tag">)[^<]*(</div>)',
+                  f'\\1ACTUALIZADO · {generated_date}\\2', html)
+
+    # 5. Title
+    html = html.replace(
+        "<title>PARI — Plan Europeo de Vivienda Asequible</title>",
+        "<title>PARI Spain — Public Affairs Risk Index</title>"
+    )
+
+    # 6. ── INJECT ANALYSIS TAB (el más importante) ──
+    # Reemplaza el contenido del tab-content id="tab-analysis"
+    if cases and analyses:
+        main_case     = cases[0]
+        main_analysis = analyses.get(main_case.get("issue_id",""), None)
+        scores        = main_case["scores"]
+        pari          = round(sum(WEIGHTS[k]*v for k,v in scores.items()))
+        risk_lbl, risk_color = get_risk(pari)
+        velocity      = main_case.get("velocity", 0)
+
+        if main_analysis:
+            analysis_content = build_analysis_tab(
+                main_analysis, pari, risk_lbl, risk_color, velocity
+            )
+        else:
+            analysis_content = build_analysis_placeholder()
+
+        # Reemplaza el contenido entre las etiquetas del tab de análisis
+        # Busca el div del tab-analysis y reemplaza su contenido interno
+        tab_pattern = r'(<div class="tab-content" id="tab-analysis">).*?(</div>\s*<!-- ── SCORE)'
+        replacement = f'\\1\n  {analysis_content}\n  \\2'
+        new_html = re.sub(tab_pattern, replacement, html, flags=re.DOTALL, count=1)
+
+        # Fallback: buscar el bloque de otra forma si el comentario no existe
+        if new_html == html:
+            tab_pattern2 = r'(<div class="tab-content" id="tab-analysis">)(.*?)(<div class="tab-content active" id="tab-score">|<div class="tab-content" id="tab-score">)'
+            replacement2 = f'\\1\n  {analysis_content}\n  \\3'
+            new_html = re.sub(tab_pattern2, replacement2, html, flags=re.DOTALL, count=1)
+
+        if new_html != html:
+            html = new_html
+            print("  ✅ Análisis cualitativo inyectado correctamente.")
+        else:
+            print("  ⚠  No se pudo inyectar el análisis (el tab no se encontró). Usando contenido original.")
+
+    return html
+
+
+# ── Main ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    log("🚀 PARI Spain Engine v2")
-    log(f"   Fecha: {DATE_STR}")
+    print(f"📄 PARI Spain — Generando dashboard v4 · {TODAY}")
 
-    if not ISSUES_FILE.exists():
-        log("❌ issues.json no encontrado")
+    result = load_scores()
+    cases, generated_date = result if isinstance(result, tuple) else (result, TODAY)
+
+    # Carga todos los análisis disponibles
+    analyses = {}
+    for c in cases:
+        iid      = c.get("issue_id", "")
+        analysis = load_analysis(iid)
+        if analysis:
+            analyses[iid] = analysis
+            print(f"  📋 Análisis cargado: {iid}")
+        else:
+            print(f"  ⚠  Sin análisis JSON para: {iid} — usando placeholder")
+
+    print(f"  Issues: {len(cases)}")
+    for c in cases:
+        pari = round(sum(WEIGHTS[k]*v for k,v in c["scores"].items()))
+        print(f"    {c['name']}: PARI={pari} vel={c['velocity']:+d}")
+
+    if not TEMPLATE.exists():
+        print(f"  ❌ Template no encontrado: {TEMPLATE}")
         raise SystemExit(1)
 
-    issues = json.loads(ISSUES_FILE.read_text())
-    active = [i for i in issues if i.get("active", True)]
-    log(f"   Issues activos: {[i['id'] for i in active]}")
-
-    results = []
-    for issue in active:
-        try:
-            r = run_issue(issue)
-            results.append(r)
-        except Exception as e:
-            log(f"❌ Error en {issue['id']}: {e}")
-            import traceback; traceback.print_exc()
-
-    generate_summary(results)
-    log(f"\n✅ Completado — {len(results)} issues procesados")
+    template_html = TEMPLATE.read_text(encoding="utf-8")
+    final_html    = inject(template_html, cases, analyses, generated_date)
+    OUT_FILE.write_text(final_html, encoding="utf-8")
+    print(f"  ✅ {OUT_FILE} ({OUT_FILE.stat().st_size//1024}KB)")

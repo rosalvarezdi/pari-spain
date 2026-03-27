@@ -1,0 +1,6 @@
+requests==2.31.0
+pytrends==4.9.2
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+pandas==2.1.4
+lxml==5.1.0

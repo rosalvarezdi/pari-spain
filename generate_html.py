@@ -1,183 +1,230 @@
 """
-PARI Spain — HTML Dashboard Generator
-======================================
-Genera el archivo index.html para GitHub Pages.
+PARI Spain — HTML Generator v2
+================================
+Usa PARI_Standalone.html como template base e inyecta
+los datos reales calculados por collect_data.py.
+El diseño es siempre el completo; solo cambian los datos.
 """
 
 import json
+import re
 import datetime
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent / "data"
-OUT_FILE = Path(__file__).parent / "docs" / "index.html"
-OUT_FILE.parent.mkdir(exist_ok=True)
+DATA_DIR   = Path(__file__).parent / "data"
+DOCS_DIR   = Path(__file__).parent / "docs"
+DOCS_DIR.mkdir(exist_ok=True)
+OUT_FILE   = DOCS_DIR / "index.html"
+
+# El template base es el standalone con diseño completo
+TEMPLATE   = Path(__file__).parent / "PARI_Standalone.html"
+
+TODAY = datetime.date.today().isoformat()
+
 
 def load_data():
-    """Carga el resumen y el detalle de cada issue."""
+    """Carga los datos reales. Si no existen, devuelve datos hardcodeados."""
     summary_file = DATA_DIR / "summary.json"
+
     if not summary_file.exists():
-        # Fallback para evitar que el script falle si no hay datos aún
-        return {"generated_at": str(datetime.datetime.now()), "issues": []}, {}, {}
-    
-    summary = json.loads(summary_file.read_text(encoding='utf-8'))
-    
-    histories = {}
-    details = {}
-    for issue in summary.get("issues", []):
-        issue_id = issue['id']
-        # Carga historiales
-        h_file = DATA_DIR / f"{issue_id}_history.json"
-        if h_file.exists():
-            histories[issue_id] = json.loads(h_file.read_text(encoding='utf-8'))
-        
-        # Carga detalles completos
-        d_file = DATA_DIR / f"{issue_id}_latest.json"
-        if d_file.exists():
-            details[issue_id] = json.loads(d_file.read_text(encoding='utf-8'))
-    
-    return summary, histories, details
+        print("  ⚠  No hay datos en /data — usando valores de referencia.")
+        return get_fallback_data()
 
-def build_history_sparkline(history, pillar=None, width=120, height=32):
-    """Genera un SVG sparkline."""
-    if not history or len(history) < 2:
-        return f'<svg width="{width}" height="{height}"></svg>'
-    
-    values = [h.get(pillar or "pari", 50) for h in history[-30:]]
-    n = len(values)
-    v_min, v_max = 0, 100
-    
-    pts = []
-    for i, v in enumerate(values):
-        x = i / (n - 1) * width if n > 1 else 0
-        y = height - (v - v_min) / (v_max - v_min) * height
-        pts.append(f"{x:.1f},{y:.1f}")
-    
-    polyline = " ".join(pts)
-    last = values[-1]
-    if last <= 40:   color = "#16A34A"
-    elif last <= 60: color = "#CA8A04"
-    elif last <= 75: color = "#EA580C"
-    else:            color = "#DC2626"
-    
-    return f'''<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" style="display:block">
-      <polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.8"/>
-      <circle cx="{pts[-1].split(',')[0]}" cy="{pts[-1].split(',')[1]}" r="2.5" fill="{color}"/>
-    </svg>'''
+    try:
+        summary  = json.loads(summary_file.read_text())
+        issues   = summary.get("issues", [])
+        if not issues:
+            return get_fallback_data()
 
-def format_velocity(v):
-    if v > 0:  return f'<span style="color:#DC2626">▲ +{v}</span>'
-    if v < 0:  return f'<span style="color:#16A34A">▼ {v}</span>'
-    return f'<span style="color:#9CA3AF">→ 0</span>'
+        cases = []
+        for iss in issues:
+            h_file = DATA_DIR / f"{iss['id']}_history.json"
+            history = []
+            if h_file.exists():
+                try:
+                    history = json.loads(h_file.read_text())
+                except:
+                    pass
 
-def risk_badge(level, color):
-    bg_map = {"Mínimo":"#DCFCE7","Bajo":"#D9F99D","Moderado":"#FEF9C3","Elevado":"#FFEDD5","Alto":"#FEE2E2","Crítico":"#F3E8FF"}
-    text_map = {"Mínimo":"#166534","Bajo":"#3F6212","Moderado":"#854D0E","Elevado":"#9A3412","Alto":"#991B1B","Crítico":"#6B21A8"}
-    bg = bg_map.get(level, "#F3F4F6")
-    txt = text_map.get(level, "#374151")
-    return f'<span style="background:{bg};color:{txt};padding:2px 10px;border-radius:12px;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase">{level}</span>'
+            cases.append({
+                "name":     iss["name"],
+                "scores":   iss["scores"],
+                "velocity": iss.get("velocity", 0),
+                "analyst":  "PARI Spain",
+                "date":     iss.get("date", TODAY),
+                "history":  history,
+            })
 
-def generate_html():
-    summary, histories, details = load_data()
-    generated = summary.get("generated_at", "")[:10]
-    issues = summary.get("issues", [])
-    
-    if not issues:
-        OUT_FILE.write_text("No data available yet.", encoding='utf-8')
-        return
+        return cases, TODAY
 
-    main = issues[0]
-    main_id = main.get("id", "")
-    main_hist = histories.get(main_id, [])
-    main_det = details.get(main_id, {})
-    
-    cases_js = json.dumps([{
-        "id": iss["id"],
-        "name": iss["name"],
-        "pari": iss["pari"],
-        "risk": iss["risk_level"],
-        "velocity": iss["velocity"],
-        "scores": iss["scores"],
-        "history": histories.get(iss["id"], []),
-    } for iss in issues], ensure_ascii=False)
-    
-    sparkline_svg = build_history_sparkline(main_hist, width=200, height=40)
-    
-    tracker_rows = ""
-    for iss in issues:
-        h = histories.get(iss["id"], [])
-        spark = build_history_sparkline(h, width=80, height=24)
-        tracker_rows += f'''
-        <div class="card" style="display:flex;align-items:center;gap:12px;margin-bottom:7px;padding:10px 14px">
-          <div style="flex:1">
-            <div style="font-size:12px;font-weight:600;font-family:Lora,serif">{iss["name"]}</div>
-            <div style="font-size:8px;color:#9CA3AF;letter-spacing:1px">{iss.get("date","")} · {format_velocity(iss["velocity"])}</div>
-          </div>
-          <div>{spark}</div>
-          <div style="text-align:right">
-            <div style="font-size:20px;font-weight:700;color:{iss["risk_color"]};font-family:Lora,serif">{iss["pari"]}</div>
-            {risk_badge(iss["risk_level"], iss["risk_color"])}
-          </div>
-        </div>'''
+    except Exception as e:
+        print(f"  ⚠  Error leyendo datos: {e} — usando valores de referencia.")
+        return get_fallback_data()
 
-    # Usamos f-string con llaves dobles {{ }} para escapar el CSS/JS
-    full_html = f'''<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>PARI Spain — Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
-<style>
-:root {{ --bg:#F8F6F1; --gold:#9A6F3A; --text:#1A1A2E; --border:rgba(0,0,0,0.09); }}
-body {{ background:var(--bg); color:var(--text); font-family:'IBM Plex Mono',monospace; margin:0; }}
-header {{ background:#fff; padding:14px 28px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }}
-.app {{ display:grid; grid-template-columns:300px 1fr; min-height:100vh; }}
-.left {{ background:#fff; border-right:1px solid var(--border); padding:20px; }}
-.card {{ background:#fff; border:1px solid var(--border); border-radius:8px; padding:15px; box-shadow:0 2px 4px rgba(0,0,0,0.02); }}
-.section-label {{ font-size:8px; letter-spacing:2px; color:#6B7280; margin-bottom:10px; text-transform:uppercase; }}
-.btn {{ padding:6px 12px; font-size:10px; cursor:pointer; border:1px solid var(--border); background:#F0EDE6; border-radius:4px; }}
-.btn.active {{ background:rgba(154,111,58,0.1); color:var(--gold); border-color:var(--gold); }}
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <div style="font-size:8px;letter-spacing:3px;color:#6B7280">PUBLIC AFFAIRS RISK INDEX</div>
-    <div style="font-family:Lora,serif;font-size:20px;font-weight:700">PARI Spain <span style="font-size:10px;color:#9CA3AF">Beta</span></div>
-  </div>
-  <div style="font-size:10px;background:#F0EDE6;padding:4px 10px;border-radius:12px">🔄 {generated}</div>
-</header>
-<div class="app">
-  <div class="left">
-    <div class="section-label">Issue Activo</div>
-    <div class="card" id="issueName" style="font-weight:600;margin-bottom:20px">{main.get("name","")}</div>
-    
-    <div class="section-label">Puntuación Compuesta</div>
-    <div class="card" style="text-align:center;margin-bottom:20px">
-        <div style="font-size:48px;font-family:Lora,serif;font-weight:700;color:{main.get("risk_color")}">{main.get("pari")}</div>
-        <div style="font-size:10px;font-weight:700">{main.get("risk_level").upper()}</div>
-    </div>
 
-    <div class="section-label">Tendencia</div>
-    <div class="card">{sparkline_svg}</div>
-  </div>
-  
-  <div style="padding:20px">
-    <div class="section-label">Listado de Riesgos</div>
-    <div id="trackerList">{tracker_rows}</div>
-  </div>
-</div>
+def get_fallback_data():
+    """Datos de referencia cuando aún no hay datos calculados."""
+    cases = [
+        {
+            "name":     "Plan Europeo Vivienda Asequible",
+            "scores":   {"mai": 62, "pai": 79, "spi": 65, "pubai": 58, "nsi": 71},
+            "velocity": 8,
+            "analyst":  "PARI Spain",
+            "date":     TODAY,
+            "history":  [],
+        },
+        {
+            "name":     "AI Regulation (EU)",
+            "scores":   {"mai": 72, "pai": 81, "spi": 68, "pubai": 55, "nsi": 79},
+            "velocity": 8,
+            "analyst":  "PARI Spain",
+            "date":     TODAY,
+            "history":  [],
+        },
+        {
+            "name":     "Food Dyes (Children's Health)",
+            "scores":   {"mai": 62, "pai": 71, "spi": 68, "pubai": 45, "nsi": 74},
+            "velocity": 5,
+            "analyst":  "PARI Spain",
+            "date":     TODAY,
+            "history":  [],
+        },
+        {
+            "name":     "Carbon Border Adjustment",
+            "scores":   {"mai": 48, "pai": 66, "spi": 52, "pubai": 28, "nsi": 44},
+            "velocity": 3,
+            "analyst":  "PARI Spain",
+            "date":     TODAY,
+            "history":  [],
+        },
+    ]
+    return cases, TODAY
 
-<script>
-const CASES = {cases_js};
-console.log("Datos cargados:", CASES);
-// Aquí puedes añadir la lógica de Chart.js si la necesitas
-</script>
-</body>
-</html>'''
 
-    OUT_FILE.write_text(full_html, encoding='utf-8')
-    print(f"✅ Dashboard generado en: {OUT_FILE}")
+def build_cases_js(cases):
+    """Construye el bloque JavaScript const CASES = [...] con datos reales."""
+    lines = ["/* ═══ CASOS — generado automáticamente por PARI ═══\n"
+             "   Actualizado: " + TODAY + " */\n"
+             "const CASES = ["]
+    for c in cases:
+        scores = c["scores"]
+        history_compact = [
+            {k: v for k, v in h.items()
+             if k in ("date","pari","mai","pai","spi","pubai","nsi","velocity")}
+            for h in c.get("history", [])[-90:]
+        ]
+        entry = (
+            "  {\n"
+            f'    name:"{c["name"]}",\n'
+            f'    scores:{{{",".join(f"{k}:{v}" for k,v in scores.items())}}},\n'
+            f'    velocity:{c["velocity"]},\n'
+            f'    analyst:"{c["analyst"]}",\n'
+            f'    date:"{c["date"]}",\n'
+            f'    history:{json.dumps(history_compact, ensure_ascii=False)},\n'
+            "  },"
+        )
+        lines.append(entry)
+    lines.append("];")
+    return "\n".join(lines)
+
+
+def build_header_buttons(cases):
+    """Genera los botones del header para cada issue."""
+    btns = []
+    for i, c in enumerate(cases):
+        short = c["name"].split("(")[0].strip()[:28]
+        active = ' active-case' if i == 0 else ''
+        btns.append(
+            f'    <button class="demo-btn{active}" onclick="loadCase({i})">{short}</button>'
+        )
+    return "\n".join(btns)
+
+
+def inject_data(template_html, cases, generated_date):
+    """
+    Reemplaza en el template:
+      1. El bloque const CASES = [...] con los datos reales
+      2. Los botones del header con los issues reales
+      3. El valor del issue-input inicial
+      4. El badge de fecha de actualización
+    """
+    html = template_html
+
+    # ── 1. Reemplazar bloque CASES ──────────────────────────────────
+    # Marcador de inicio: línea que dice /* ═══ CASOS...  o  const CASES = [
+    # Marcador de fin:    el ]; que cierra el array
+    # Buscamos el bloque completo con regex
+    pattern = r'/\* ═══ CASOS.*?const CASES = \[.*?\];'
+    new_cases_block = build_cases_js(cases)
+
+    result = re.sub(pattern, new_cases_block, html, flags=re.DOTALL)
+    if result == html:
+        # fallback: reemplazar solo const CASES = [...]; sin el comentario
+        pattern2 = r'const CASES = \[.*?\];'
+        result = re.sub(pattern2, new_cases_block, html, flags=re.DOTALL, count=1)
+
+    html = result
+
+    # ── 2. Reemplazar botones del header ────────────────────────────
+    old_btns_pattern = r'(<div class="header-btns">).*?(</div>)'
+    new_btns = f'\\1\n{build_header_buttons(cases)}\n  \\2'
+    html = re.sub(old_btns_pattern, new_btns, html, flags=re.DOTALL, count=1)
+
+    # ── 3. Actualizar el input del issue activo ──────────────────────
+    first_name = cases[0]["name"] if cases else "PARI Spain"
+    html = re.sub(
+        r'(id="issueName"\s+value=")[^"]*(")',
+        f'\\g<1>{first_name}\\2',
+        html
+    )
+
+    # ── 4. Actualizar badge de fecha ─────────────────────────────────
+    html = re.sub(
+        r'(class="case-tag">)[^<]*(</div>)',
+        f'\\1ACTUALIZADO · {generated_date}\\2',
+        html
+    )
+
+    # ── 5. Actualizar title ──────────────────────────────────────────
+    html = html.replace(
+        "<title>PARI — Plan Europeo de Vivienda Asequible</title>",
+        "<title>PARI Spain — Public Affairs Risk Index</title>"
+    )
+
+    return html
+
 
 if __name__ == "__main__":
-    generate_html()
+    print("📄 PARI Spain — Generando dashboard...")
+
+    # Cargar datos
+    result = load_data()
+    if isinstance(result, tuple):
+        cases, generated_date = result
+    else:
+        cases, generated_date = result, TODAY
+
+    print(f"  Issues cargados: {len(cases)}")
+    for c in cases:
+        pari = round(sum({
+            "mai":0.20,"pai":0.30,"spi":0.20,"pubai":0.15,"nsi":0.15
+        }[k]*v for k,v in c["scores"].items()))
+        print(f"    {c['name']}: PARI={pari}, velocity={c['velocity']:+d}")
+
+    # Leer template
+    if not TEMPLATE.exists():
+        print(f"  ❌ No se encuentra PARI_Standalone.html en {TEMPLATE}")
+        print("     Asegúrate de que el archivo está en el repositorio.")
+        raise SystemExit(1)
+
+    template_html = TEMPLATE.read_text(encoding="utf-8")
+    print(f"  Template: {TEMPLATE.name} ({len(template_html)//1024}KB)")
+
+    # Inyectar datos
+    final_html = inject_data(template_html, cases, generated_date)
+
+    # Escribir output
+    OUT_FILE.write_text(final_html, encoding="utf-8")
+    print(f"  ✅ Dashboard generado: {OUT_FILE}")
+    print(f"     Tamaño: {OUT_FILE.stat().st_size // 1024}KB")
+    print(f"     Fecha:  {generated_date}")

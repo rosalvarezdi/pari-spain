@@ -1,0 +1,108 @@
+{
+  "issue_id": "vivienda_asequible",
+  "issue_name": "Plan Europeo Vivienda Asequible",
+  "date": "2026-03-27",
+  "pari": 37,
+  "risk_level": "Bajo",
+  "risk_color": "#65A30D",
+  "velocity": 0,
+  "pillar_scores": {
+    "mai": 16,
+    "pai": 28,
+    "spi": 50,
+    "pubai": 62,
+    "nsi": 38
+  },
+  "pillar_detail": {
+    "mai": {
+      "score": 16,
+      "sub": {
+        "coverage_volume": 0,
+        "sentiment_trajectory": 50,
+        "acceleration": 20,
+        "media_tier": 0,
+        "editorial": 0
+      },
+      "raw": {
+        "recent_articles": 0,
+        "baseline_weekly": 1,
+        "avg_tone": 0,
+        "tier1_articles": 0
+      }
+    },
+    "pai": {
+      "score": 28,
+      "sub": {
+        "legislative_pipeline": 10,
+        "parliamentary_mentions": 30,
+        "regulatory_signals": 30,
+        "executive_statements": 35,
+        "cross_border_contagion": 48
+      },
+      "raw": {
+        "eurlex_docs": 0,
+        "parl_hits": 0,
+        "reg_hits": 0
+      }
+    },
+    "spi": {
+      "score": 50,
+      "sub": {
+        "ngo_civil_society": 85,
+        "advocacy_campaigns": 48,
+        "corporate_repositioning": 30,
+        "think_tank_output": 39,
+        "legal_litigation": 38
+      },
+      "raw": {
+        "ngo_hits": 17,
+        "campaign_hits": 4,
+        "legal_hits": 2
+      }
+    },
+    "pubai": {
+      "score": 62,
+      "sub": {
+        "search_intensity": 40,
+        "social_volume": 95,
+        "virality": 80,
+        "public_polarity": 40,
+        "geographic_concentration": 45
+      },
+      "raw": {
+        "search_score": 40,
+        "social_count": 63
+      }
+    },
+    "nsi": {
+      "score": 38,
+      "sub": {
+        "keyword_emergence": 40,
+        "framing_migration": 40,
+        "metaphor_tracking": 20,
+        "narrative_coalition": 20,
+        "counter_narrative": 100
+      },
+      "raw": {
+        "risk_kw_count": 0,
+        "moral_count": 0,
+        "coalition_domains": 0
+      }
+    }
+  },
+  "weights": {
+    "mai": 0.2,
+    "pai": 0.3,
+    "spi": 0.2,
+    "pubai": 0.15,
+    "nsi": 0.15
+  },
+  "contributions": {
+    "mai": 3.2,
+    "pai": 8.4,
+    "spi": 10.0,
+    "pubai": 9.3,
+    "nsi": 5.7
+  },
+  "generated_at": "2026-03-27T13:27:18.323372Z"
+}

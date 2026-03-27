@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-03-27T13:27:18.324070Z",
+  "date": "2026-03-27",
+  "issues": [
+    {
+      "id": "vivienda_asequible",
+      "name": "Plan Europeo Vivienda Asequible",
+      "date": "2026-03-27",
+      "pari": 37,
+      "risk_level": "Bajo",
+      "risk_color": "#65A30D",
+      "velocity": 0,
+      "scores": {
+        "mai": 16,
+        "pai": 28,
+        "spi": 50,
+        "pubai": 62,
+        "nsi": 38
+      }
+    }
+  ]
+}

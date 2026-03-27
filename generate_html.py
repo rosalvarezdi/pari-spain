@@ -17,7 +17,7 @@ DOCS_DIR.mkdir(exist_ok=True)
 OUT_FILE   = DOCS_DIR / "index.html"
 
 # El template base es el standalone con diseño completo
-TEMPLATE   = Path(__file__).parent / "PARI_Standalone.html"
+TEMPLATE   = Path(__file__).parent / "data" / "PARI_Standalone.html"
 
 TODAY = datetime.date.today().isoformat()
 
